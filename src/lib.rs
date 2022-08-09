@@ -25,37 +25,64 @@ pub use tempfile::Builder;
 #[cfg(feature = "which")]
 use which::which;
 
+mod config;
+
+use config::{
+    Config, 
+    Editor::{self, VIM, VI, NVIM, NANO, EMACS, PICO}
+};
+
 static ENV_VARS: &[&str] = &["VISUAL", "EDITOR"];
 
 // TODO: should we hardcode full paths as well in case $PATH is borked?
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 #[rustfmt::skip]
-static HARDCODED_NAMES: &[&str] = &[
+static HARDCODED_NAMES: &[(&str, Option<Editor>)] = &[
     // CLI editors
-    "nano", "pico", "vim", "nvim", "vi", "emacs",
+    ("nano", Some(NANO)), 
+    ("pico", Some(PICO)), 
+    ("vim", Some(VIM)), 
+    ("nvim", Some(NVIM)), 
+    ("vi", Some(VI)), 
+    ("emacs", Some(EMACS)),
     // GUI editors
-    "code", "atom", "subl", "gedit", "gvim",
+    ("code", None), 
+    ("atom", None), 
+    ("subl", None), 
+    ("gedit", None), 
+    ("gvim", None),
     // Generic "file openers"
-    "xdg-open", "gnome-open", "kde-open",
+    ("xdg-open", None), 
+    ("gnome-open", None), 
+    ("kde-open", None),
 ];
 
 #[cfg(target_os = "macos")]
 #[rustfmt::skip]
-static HARDCODED_NAMES: &[&str] = &[
+static HARDCODED_NAMES: &[(&str, Option<Editor>)] = &[
     // CLI editors
-    "nano", "pico", "vim", "nvim", "vi", "emacs",
+    ("nano", Some(NANO)), 
+    ("pico", Some(PICO)), 
+    ("vim", Some(VIM)), 
+    ("nvim", Some(NVIM)), 
+    ("vi", Some(VI)), 
+    ("emacs", Some(EMACS)),
     // open has a special flag to open in the default text editor
     // (this really should come before the CLI editors, but in order
     // not to break compatibility, we still prefer CLI over GUI)
-    "open -Wt",
+    ("open -Wt", None),
     // GUI editors
-    "code -w", "atom -w", "subl -w", "gvim", "mate",
+    ("code -w", None), 
+    ("atom -w", None), 
+    ("subl -w", None), 
+    ("gvim", None), 
+    ("mate", None),
     // Generic "file openers"
-    "open -a TextEdit",
-    "open -a TextMate",
+    ("open -a TextEdit", None),
+    ("open -a TextMate", None),
     // TODO: "open -f" reads input from standard input and opens with
     // TextEdit. if this flag were used we could skip the tempfile
-    "open",
+    ("open", None),
 ];
 
 #[cfg(target_os = "windows")]
@@ -89,11 +116,24 @@ fn get_full_editor_path<T: AsRef<OsStr> + AsRef<Path>>(binary_name: T) -> Result
 }
 
 #[cfg(not(feature = "quoted-env"))]
-fn string_to_cmd(s: String) -> (PathBuf, Vec<String>) {
+fn string_to_cmd(s: String, config: &Config) -> (PathBuf, Vec<String>) {
     let mut args = s.split_ascii_whitespace();
+    let editor_string = args.next().unwrap();
+    let editor = Editor::get_editor(&editor_string);
+    let mut cmdargs = Vec::new();
+
+    if let Some(ed) = editor {
+        if let Some(line_nr) = config.line_nr{
+            if let Some(arg) = ed.line_nr_arg(line_nr){
+                cmdargs.push(arg)
+            }
+        }
+    }
+
     (
-        args.next().unwrap().into(),
-        args.map(String::from).collect(),
+        editor_string.into(),
+        cmdargs.into_iter().chain(args.map(String::from)).collect()
+        // args.map(String::from).collect(),
     )
 }
 
@@ -111,8 +151,10 @@ fn string_to_cmd(s: String) -> (PathBuf, Vec<String>) {
     }
 }
 
-fn get_full_editor_cmd(s: String) -> Result<(PathBuf, Vec<String>)> {
-    let (path, args) = string_to_cmd(s);
+fn get_full_editor_cmd(s: String, config: &Config) -> Result<(PathBuf, Vec<String>)> {
+    let (path, args) = string_to_cmd(s, config);
+    println!("string_to_cmd output {:?}", (&path, &args));
+
     match get_full_editor_path(&path) {
         Ok(result) => Ok((result, args)),
         Err(_) if path.exists() => Ok((path, args)),
@@ -120,19 +162,24 @@ fn get_full_editor_cmd(s: String) -> Result<(PathBuf, Vec<String>)> {
     }
 }
 
-fn get_editor_args() -> Result<(PathBuf, Vec<String>)> {
+fn get_editor_args(config: Config) -> Result<(PathBuf, Vec<String>)> {
     ENV_VARS
         .iter()
+        // .map(|x|{println!("inmap0: {x:?}");x})
         .filter_map(env::var_os)
+        // .map(|x|{println!("inmap1: {x:?}");x})
         .filter(|v| !v.is_empty())
+        // .map(|x|{println!("inmap2: {x:?}");x})
         .filter_map(|v| v.into_string().ok())
-        .filter_map(|s| get_full_editor_cmd(s).ok())
+        // .map(|x|{println!("inmap3: {x:?}");x})
+        .filter_map(|s| get_full_editor_cmd(s, &config).ok())
+        .map(|x|{println!("inmap4: {x:?}");x})
         .next()
         .or_else(|| {
             HARDCODED_NAMES
                 .iter()
-                .map(|s| s.to_string())
-                .filter_map(|s| get_full_editor_cmd(s).ok())
+                .map(|(s, e)| (s.to_string(), e))
+                .filter_map(|(s, e)| get_full_editor_cmd(s, &config).ok())
                 .next()
         })
         .ok_or_else(|| Error::from(ErrorKind::NotFound))
@@ -174,7 +221,7 @@ fn get_editor_args() -> Result<(PathBuf, Vec<String>)> {
 /// [`Command::new`]: https://doc.rust-lang.org/std/process/struct.Command.html#method.new
 /// [`ErrorKind::NotFound`]: https://doc.rust-lang.org/std/io/enum.ErrorKind.html#variant.NotFound
 pub fn get_editor() -> Result<PathBuf> {
-    get_editor_args().map(|(x, _)| x)
+    get_editor_args(Config{line_nr:None}).map(|(x, _)| x)
 }
 
 /// Open the contents of a string or buffer in the [default editor].
@@ -311,7 +358,45 @@ pub fn edit_bytes_with_builder<B: AsRef<[u8]>>(buf: B, builder: &Builder) -> Res
 /// [`edit`]: fn.edit.html
 /// [`edit_bytes`]: fn.edit_bytes.html
 pub fn edit_file<P: AsRef<Path>>(file: P) -> Result<()> {
-    let (editor, args) = get_editor_args()?;
+    let (editor, args) = get_editor_args(Config{line_nr: None})?;
+    println!("get editor args output: editor={:?} args={:?}", editor, args);
+    let status = Command::new(&editor)
+        .args(&args)
+        .arg(file.as_ref())
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .output()?
+        .status;
+
+    if status.success() {
+        Ok(())
+    } else {
+        let full_command = if args.is_empty() {
+            format!(
+                "{} {}",
+                editor.to_string_lossy(),
+                file.as_ref().to_string_lossy()
+            )
+        } else {
+            format!(
+                "{} {} {}",
+                editor.to_string_lossy(),
+                args.join(" "),
+                file.as_ref().to_string_lossy()
+            )
+        };
+
+        Err(Error::new(
+            ErrorKind::Other,
+            format!("editor '{}' exited with error: {}", full_command, status),
+        ))
+    }
+}
+
+pub fn edit_file_line_nr<P: AsRef<Path>>(file: P, line_nr: u64) -> Result<()>  {
+    let (editor, args) = get_editor_args(Config{line_nr:Some(line_nr)})?;
+    println!("get editor args output: editor={:?} args={:?}", editor, args);
     let status = Command::new(&editor)
         .args(&args)
         .arg(file.as_ref())
